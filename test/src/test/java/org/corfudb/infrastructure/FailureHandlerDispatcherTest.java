@@ -1,5 +1,8 @@
 package org.corfudb.infrastructure;
 
+import org.corfudb.infrastructure.management.FailureHandlerDispatcher;
+import org.corfudb.infrastructure.management.IFailureHandlerPolicy;
+import org.corfudb.infrastructure.management.PurgeFailurePolicy;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.view.AbstractViewTest;
 import org.corfudb.runtime.view.Layout;

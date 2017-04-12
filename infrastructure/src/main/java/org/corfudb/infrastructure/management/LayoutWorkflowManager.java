@@ -1,4 +1,4 @@
-package org.corfudb.infrastructure;
+package org.corfudb.infrastructure.management;
 
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.runtime.exceptions.LayoutModificationException;

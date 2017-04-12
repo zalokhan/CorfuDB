@@ -1,4 +1,4 @@
-package org.corfudb.infrastructure;
+package org.corfudb.infrastructure.management;
 
 import lombok.Data;
 import org.corfudb.format.Types.NodeMetrics;
