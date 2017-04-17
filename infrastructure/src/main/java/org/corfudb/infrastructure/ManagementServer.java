@@ -440,11 +440,11 @@ public class ManagementServer extends AbstractServer {
                 // Failures detected - unresponsive servers.
                 // We check if these servers are the same set of servers which are marked as
                 // unresponsive in the layout. If yes take no action. Else trigger handler.
-                log.info("Failures detected. Failed nodes : {}", pollReport.toString());
                 // Check if this failure has already been recognized.
                 //TODO: Does not handle the un-marking case where markedSet is a superset of pollFailures.
                 for (String failedServer : pollReport.getFailingNodes()) {
                     if (!latestLayout.getUnresponsiveServers().contains(failedServer)) {
+                        log.info("Failures detected. Failed nodes : {}", pollReport.toString());
                         localManagementClient.handleFailure(pollReport.getFailingNodes()).get();
                         return;
                     }
@@ -456,6 +456,7 @@ public class ManagementServer extends AbstractServer {
                 // Failures detected but not marked in the layout or
                 // some servers have been partially sealed to new epoch or stuck on
                 // the previous epoch.
+                log.info("Failures detected. Failed nodes : {}", pollReport.toString());
                 localManagementClient.handleFailure(pollReport.getFailingNodes()).get();
                 // TODO: Only re-sealing needed if server stuck on a previous epoch.
             }

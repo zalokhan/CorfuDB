@@ -3,6 +3,7 @@ package org.corfudb.runtime.view;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.protocols.wireprotocol.LayoutPrepareResponse;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.exceptions.NetworkException;
 import org.corfudb.runtime.exceptions.OutrankedException;
 import org.corfudb.runtime.exceptions.QuorumUnreachableException;
 import org.corfudb.runtime.exceptions.WrongEpochException;
@@ -88,7 +89,15 @@ public class LayoutView extends AbstractView {
             throws QuorumUnreachableException, OutrankedException, WrongEpochException {
 
         CompletableFuture<LayoutPrepareResponse>[] prepareList = layout.getLayoutClientStream()
-                .map(x -> x.prepare(epoch, rank))
+                .map(x -> {
+                    CompletableFuture<LayoutPrepareResponse> cf = new CompletableFuture<>();
+                    try {
+                        cf = x.prepare(epoch, rank);
+                    } catch (Exception e) {
+                        cf.completeExceptionally(e);
+                    }
+                    return cf;
+                })
                 .toArray(CompletableFuture[]::new);
         LayoutPrepareResponse[] acceptList;
         long timeouts = 0L;
@@ -102,8 +111,8 @@ public class LayoutView extends AbstractView {
             // wait for someone to complete.
             try {
                 CFUtils.getUninterruptibly(CompletableFuture.anyOf(prepareList),
-                        OutrankedException.class, TimeoutException.class);
-            } catch (TimeoutException te) {
+                        OutrankedException.class, TimeoutException.class, NetworkException.class);
+            } catch (TimeoutException | NetworkException e) {
                 timeouts++;
             }
 
@@ -145,7 +154,15 @@ public class LayoutView extends AbstractView {
     public Layout propose(long epoch, long rank, Layout layout)
             throws QuorumUnreachableException, OutrankedException {
         CompletableFuture<Boolean>[] proposeList = layout.getLayoutClientStream()
-                .map(x -> x.propose(epoch, rank, layout))
+                .map(x -> {
+                    CompletableFuture<Boolean> cf = new CompletableFuture<>();
+                    try {
+                        cf =  x.propose(epoch, rank, layout);
+                    } catch (NetworkException e) {
+                        cf.completeExceptionally(e);
+                    }
+                    return cf;
+                })
                 .toArray(CompletableFuture[]::new);
 
         long timeouts = 0L;
@@ -159,8 +176,8 @@ public class LayoutView extends AbstractView {
             // wait for someone to complete.
             try {
                 CFUtils.getUninterruptibly(CompletableFuture.anyOf(proposeList),
-                        OutrankedException.class, TimeoutException.class);
-            } catch (TimeoutException te) {
+                        OutrankedException.class, TimeoutException.class, NetworkException.class);
+            } catch (TimeoutException | NetworkException e) {
                 timeouts++;
             }
 
@@ -197,7 +214,15 @@ public class LayoutView extends AbstractView {
     public void committed(long epoch, Layout layout)
             throws WrongEpochException {
         CompletableFuture<Boolean>[] commitList = layout.getLayoutClientStream()
-                .map(x -> x.committed(epoch, layout))
+                .map(x -> {
+                    CompletableFuture<Boolean> cf = new CompletableFuture<>();
+                    try {
+                        cf = x.committed(epoch, layout);
+                    } catch (NetworkException e) {
+                        cf.completeExceptionally(e);
+                    }
+                    return cf;
+                })
                 .toArray(CompletableFuture[]::new);
 
         int timeouts = 0;
@@ -206,8 +231,8 @@ public class LayoutView extends AbstractView {
             // wait for someone to complete.
             try {
                 CFUtils.getUninterruptibly(CompletableFuture.anyOf(commitList),
-                        WrongEpochException.class, TimeoutException.class);
-            } catch (TimeoutException te) {
+                        WrongEpochException.class, TimeoutException.class, NetworkException.class);
+            } catch (TimeoutException | NetworkException e) {
                 timeouts++;
             }
             responses++;
