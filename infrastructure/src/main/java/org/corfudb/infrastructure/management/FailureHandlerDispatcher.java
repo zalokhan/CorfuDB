@@ -78,7 +78,7 @@ public class FailureHandlerDispatcher {
      * @param corfuRuntime  Connected corfu runtime instance
      * @param failedServers Set of failed server addresses
      */
-    public void dispatchHandler(IFailureHandlerPolicy failureHandlerPolicy, Layout currentLayout, CorfuRuntime corfuRuntime, Set<String> failedServers) {
+    public boolean dispatchHandler(IFailureHandlerPolicy failureHandlerPolicy, Layout currentLayout, CorfuRuntime corfuRuntime, Set<String> failedServers) {
 
         try {
 
@@ -101,6 +101,7 @@ public class FailureHandlerDispatcher {
                 log.error("Conflict in updating layout by failureHandlerDispatcher: {}", oe);
                 // Update rank to be able to outrank other competition and complete paxos.
                 prepareRank = oe.getNewRank() + 1;
+                return false;
             }
 
             // Check if our proposed layout got selected and committed.
@@ -110,7 +111,9 @@ public class FailureHandlerDispatcher {
             }
         } catch (Exception e) {
             log.error("Error: dispatchHandler: {}", e);
+            return false;
         }
+        return true;
     }
 
     /**

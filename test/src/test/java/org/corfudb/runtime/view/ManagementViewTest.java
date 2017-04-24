@@ -7,7 +7,7 @@ import lombok.Getter;
 import org.corfudb.infrastructure.TestLayoutBuilder;
 import org.corfudb.infrastructure.ServerContext;
 import org.corfudb.infrastructure.ServerContextBuilder;
-import org.corfudb.infrastructure.PurgeFailurePolicy;
+import org.corfudb.infrastructure.management.PurgeFailurePolicy;
 import org.corfudb.infrastructure.TestServerRouter;
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.TokenResponse;
@@ -335,18 +335,7 @@ public class ManagementViewTest extends AbstractViewTest {
 
         // PART 3.
         // Allow management server to detect partial seal and correct this issue.
-        addClientRule(getManagementServer(SERVERS.PORT_0).getCorfuRuntime(),
-                new TestRule().matches(corfuMsg -> {
-                    if (corfuMsg.getMsgType().equals(CorfuMsgType.MANAGEMENT_FAILURE_DETECTED)) {
-                        failureDetected.release(2);
-                    }
-                    return true;
-                }));
-
-        assertThat(failureDetected.tryAcquire(2, PARAMETERS.TIMEOUT_NORMAL.toNanos(),
-                TimeUnit.NANOSECONDS)).isEqualTo(true);
-
-        for (int i = 0; i < PARAMETERS.NUM_ITERATIONS_LOW; i++) {
+        for (int i = 0; i < PARAMETERS.NUM_ITERATIONS_MODERATE; i++) {
             Thread.sleep(PARAMETERS.TIMEOUT_VERY_SHORT.toMillis());
             // Assert successful seal of all servers.
             if (getServerRouter(SERVERS.PORT_0).getServerEpoch() == 2L ||
@@ -684,5 +673,55 @@ public class ManagementViewTest extends AbstractViewTest {
         }
         corfuRuntime.getAddressSpaceView().write(tokenResponse,
                 "test".getBytes());
+    }
+
+    @Test
+    public void updateTrailingLayoutServers() throws Exception {
+        addServer(SERVERS.PORT_0);
+        addServer(SERVERS.PORT_1);
+        addServer(SERVERS.PORT_2);
+
+        Layout layout = new TestLayoutBuilder()
+                .setEpoch(1L)
+                .addLayoutServer(SERVERS.PORT_0)
+                .addLayoutServer(SERVERS.PORT_1)
+                .addLayoutServer(SERVERS.PORT_2)
+                .addSequencer(SERVERS.PORT_2)
+                .buildSegment()
+                .setReplicationMode(Layout.ReplicationMode.QUORUM_REPLICATION)
+                .buildStripe()
+                .addLogUnit(SERVERS.PORT_2)
+                .addToSegment()
+                .addToLayout()
+                .build();
+        bootstrapAllServers(layout);
+        CorfuRuntime corfuRuntime = getRuntime(layout).connect();
+        layout.setRuntime(corfuRuntime);
+
+        // Initiate SERVERS.ENDPOINT_0 failureHandler
+        corfuRuntime.getRouter(SERVERS.ENDPOINT_0).getClient(ManagementClient.class).initiateFailureHandler().get();
+        corfuRuntime.getRouter(SERVERS.ENDPOINT_1).getClient(ManagementClient.class).initiateFailureHandler().get();
+        corfuRuntime.getRouter(SERVERS.ENDPOINT_2).getClient(ManagementClient.class).initiateFailureHandler().get();
+
+        // Set aggressive timeouts.
+        setAggressiveTimeouts(layout, corfuRuntime,
+                getManagementServer(SERVERS.PORT_0).getCorfuRuntime(),
+                getManagementServer(SERVERS.PORT_1).getCorfuRuntime(),
+                getManagementServer(SERVERS.PORT_2).getCorfuRuntime());
+
+        addClientRule(corfuRuntime, SERVERS.ENDPOINT_0, new TestRule().always().drop());
+        layout.setEpoch(2L);
+        layout.moveServersToEpoch();
+        corfuRuntime.getLayoutView().updateLayout(layout, 1L);
+
+        for (int i = 0; i < PARAMETERS.NUM_ITERATIONS_MODERATE; i++) {
+            Thread.sleep(PARAMETERS.TIMEOUT_SHORT.toMillis());
+            if (getLayoutServer(SERVERS.PORT_0).getCurrentLayout().equals(layout))
+                break;
+        }
+
+        assertThat(getLayoutServer(SERVERS.PORT_0).getCurrentLayout().getEpoch()).isEqualTo(2L);
+        assertThat(getLayoutServer(SERVERS.PORT_0).getCurrentLayout()).isEqualTo(layout);
+
     }
 }

@@ -19,19 +19,28 @@ import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
 import org.corfudb.protocols.wireprotocol.FailureDetectorMsg;
 
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.clients.LayoutClient;
 import org.corfudb.runtime.clients.ManagementClient;
+import org.corfudb.runtime.exceptions.QuorumUnreachableException;
 import org.corfudb.runtime.view.Layout;
+import org.corfudb.runtime.view.QuorumFuturesFactory;
 
 import java.lang.invoke.MethodHandles;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntFunction;
 
 /**
  * Instantiates and performs failure detection and handling asynchronously.
@@ -288,8 +297,16 @@ public class ManagementServer extends AbstractServer {
 
         log.info("Received Failures : {}", msg.getPayload().getNodes());
         try {
-            failureHandlerDispatcher.dispatchHandler(failureHandlerPolicy, (Layout) latestLayout.clone(), getCorfuRuntime(), msg.getPayload().getNodes());
-            r.sendResponse(ctx, msg, new CorfuMsg(CorfuMsgType.ACK));
+            boolean result = failureHandlerDispatcher.dispatchHandler(
+                    failureHandlerPolicy,
+                    (Layout) latestLayout.clone(),
+                    getCorfuRuntime(),
+                    msg.getPayload().getNodes());
+            if (result) {
+                r.sendResponse(ctx, msg, new CorfuMsg(CorfuMsgType.ACK));
+            } else {
+                r.sendResponse(ctx, msg, new CorfuMsg(CorfuMsgType.NACK));
+            }
         } catch (CloneNotSupportedException e) {
             log.error("Failure Handler could not clone layout: {}", e);
             r.sendResponse(ctx, msg, new CorfuMsg(CorfuMsgType.NACK));
@@ -420,6 +437,16 @@ public class ManagementServer extends AbstractServer {
             return;
         }
 
+        // If node has been removed. Then it should not attempt to change layout.
+        if (!latestLayout.getAllServers().contains(getLocalEndpoint()) ||
+                latestLayout.getUnresponsiveServers().contains(getLocalEndpoint())) {
+            log.warn("This Server is not a part of the active layout. Aborting failure handling.");
+            return;
+        }
+
+        // Corrects out of phase epoch issues if present in the report.
+        correctOutOfPhaseEpochs(pollReport);
+
         final ManagementClient localManagementClient = corfuRuntime.getRouter(getLocalEndpoint()).getClient(ManagementClient.class);
 
         try {
@@ -451,19 +478,119 @@ public class ManagementServer extends AbstractServer {
                 }
                 log.debug("Failure already taken care of.");
 
-            } else {
+            } else if (!pollReport.getFailingNodes().isEmpty()) {
                 // CASE 3:
-                // Failures detected but not marked in the layout or
-                // some servers have been partially sealed to new epoch or stuck on
-                // the previous epoch.
+                // Failures detected but not marked in the layout
                 log.info("Failures detected. Failed nodes : {}", pollReport.toString());
                 localManagementClient.handleFailure(pollReport.getFailingNodes()).get();
-                // TODO: Only re-sealing needed if server stuck on a previous epoch.
             }
 
         } catch (Exception e) {
             log.error("Exception invoking failure handler : {}", e);
         }
+    }
+
+    /**
+     * Corrects out of phase epochs by resealing the servers.
+     * This would also need to update trailing layout servers.
+     *
+     * @param pollReport Poll Report from running the failure detection policy.
+     */
+    private void correctOutOfPhaseEpochs(PollReport pollReport) {
+        final Map<String, Long> outOfPhaseEpochNodes = pollReport.getOutOfPhaseEpochNodes();
+        if (outOfPhaseEpochNodes.isEmpty()) {
+            return;
+        }
+
+        try {
+            // Query all layout servers to get quorum Layout.
+            Map<String, CompletableFuture<Layout>> layoutCompletableFutureMap = new HashMap<>();
+            for (String layoutServer : latestLayout.getLayoutServers()) {
+                layoutCompletableFutureMap.put(
+                        layoutServer, getCorfuRuntime().getRouter(layoutServer).getClient(LayoutClient.class).getLayout());
+            }
+
+            // Retrieve the correct layout from quorum of members to reseal servers.
+            // If we are unable to reach a consensus from a quorum we get an exception and abort the
+            // epoch correction phase.
+            safeUpdateLayout(fetchQuorumLayout(
+                    layoutCompletableFutureMap.values().toArray(new CompletableFuture[layoutCompletableFutureMap.size()])
+            ));
+
+            // We clone the layout to not pollute the original latestLayout.
+            Layout sealLayout = (Layout) latestLayout.clone();
+            sealLayout.setRuntime(getCorfuRuntime());
+
+            // Re-seal all servers with the latestLayout epoch.
+            sealLayout.setEpoch(latestLayout.getEpoch());
+            sealLayout.moveServersToEpoch();
+
+            // Check if any layout server has a stale layout.
+            // If yes patch it (commit) with the latestLayout (received from quorum).
+            updateTrailingLayoutServers(layoutCompletableFutureMap);
+
+        } catch (CloneNotSupportedException | QuorumUnreachableException e) {
+            log.error("Error in correcting server epochs: {}", e);
+        }
+    }
+
+    /**
+     * Fetches the updated layout from quorum of layout servers.
+     *
+     * @return quorum agreed layout.
+     * @throws QuorumUnreachableException If unable to receive consensus on layout.
+     */
+    private Layout fetchQuorumLayout(CompletableFuture<Layout>[] completableFutures) throws QuorumUnreachableException {
+
+        QuorumFuturesFactory.CompositeFuture<Layout> quorumFuture = QuorumFuturesFactory.getQuorumFuture(
+                        Comparator.comparing(Layout::asJSONString),
+                        completableFutures);
+        try {
+            return quorumFuture.get();
+        } catch (ExecutionException | InterruptedException e) {
+            if (e.getCause() instanceof QuorumUnreachableException) {
+                throw (QuorumUnreachableException) e.getCause();
+            }
+
+            int reachableServers = (int) Arrays.stream(completableFutures)
+                    .filter(booleanCompletableFuture -> !booleanCompletableFuture.isCompletedExceptionally()).count();
+            throw new QuorumUnreachableException(reachableServers, completableFutures.length);
+        }
+    }
+
+    /**
+     * Finds all trailing layout servers and patches them with the latestLayout
+     * retrieved by quorum.
+     *
+     * @throws QuorumUnreachableException
+     */
+    private void updateTrailingLayoutServers(Map<String, CompletableFuture<Layout>> layoutCompletableFutureMap)
+            throws QuorumUnreachableException {
+
+        // Patch trailing layout servers with latestLayout.
+        layoutCompletableFutureMap.keySet().forEach( layoutServer -> {
+            Layout layout = null;
+            try {
+                layout = layoutCompletableFutureMap.get(layoutServer).get();
+            } catch (InterruptedException | ExecutionException ignored) {}
+
+            if (layout == null || layout.equals(latestLayout)) {
+                return;
+            }
+            try {
+                boolean result = getCorfuRuntime().getRouter(layoutServer).getClient(LayoutClient.class)
+                        .committed( latestLayout.getEpoch(), latestLayout).get();
+                if (result) {
+                    log.trace("Layout Server: {} successfully patched with latest layout : {}",
+                            layoutServer, latestLayout);
+                } else {
+                    log.trace("Layout Server: {} patch with latest layout failed : {}",
+                            layoutServer, latestLayout);
+                }
+            } catch (InterruptedException | ExecutionException e) {
+                log.error("Updating layout servers failed due to : {}", e);
+            }
+        });
     }
 
     /**

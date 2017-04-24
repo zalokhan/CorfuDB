@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -40,6 +41,7 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
      */
     private int[] historyPollFailures = null;
     private long[] historyPollEpochExceptions = null;
+    private ConcurrentHashMap<String, Long> historyNodeEpoch;
     private int historyPollCount = 0;
     private HashMap<String, Boolean> historyStatus = null;
     private CompletableFuture[] pollCompletableFutures = null;
@@ -90,6 +92,7 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
             historyServers = allServers;
             historyRouters = new IClientRouter[allServers.length];
             historyPollFailures = new int[allServers.length];
+            historyNodeEpoch = new ConcurrentHashMap<>();
             historyPollEpochExceptions = new long[allServers.length];
             pollCompletableFutures = new CompletableFuture[allServers.length];
             for (int i = 0; i < allServers.length; i++) {
@@ -97,9 +100,8 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
                     historyStatus.put(allServers[i], true);  // Assume it's up until we think it isn't.
                 }
                 historyRouters[i] = corfuRuntime.getRouterFunction.apply(allServers[i]);
-                historyRouters[i].start();
                 historyPollFailures[i] = 0;
-                historyPollEpochExceptions[i] = -1;
+                historyPollEpochExceptions[i] = 0;
             }
             historyPollCount = 0;
         } else {
@@ -123,12 +125,26 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
                     boolean pingResult = historyRouters[ii].getClient(BaseClient.class).ping().get();
                     historyPollFailures[ii] = pingResult ? 0 : historyPollFailures[ii] + 1;
                 } catch (Exception e ) {
-                    // If Wrong epoch exception is received, mark server as failed.
+                    // If Wrong epoch exception is received, mark server as out of phase.
+                    // For any other exception mark node as failure.
+                    log.debug("Ping failed for {}. Cause : {}", historyServers[ii], e);
                     if (e.getCause() instanceof WrongEpochException) {
-                        historyPollEpochExceptions[ii] = ((WrongEpochException) e.getCause()).getCorrectEpoch();
+                        final long pingedNodeEpoch = ((WrongEpochException) e.getCause()).getCorrectEpoch();
+
+                        // If pinged node has wrong epoch for the first time (see else block) we put
+                        // incorrect epoch in map and increment counter.
+                        // If the node is consistently on the wrong epoch we continue incrementing
+                        // the counter.
+                        if (pingedNodeEpoch == historyNodeEpoch.getOrDefault(historyServers[ii], -1L)) {
+                            historyPollEpochExceptions[ii]++;
+                        } else {
+                            historyNodeEpoch.put(historyServers[ii], pingedNodeEpoch);
+                            historyPollEpochExceptions[ii] = 0;
+                        }
+                    } else {
+                        // Otherwise mark as failure.
+                        historyPollFailures[ii]++;
                     }
-                    log.debug("Ping failed for " + historyServers[ii] + " with " + e);
-                    historyPollFailures[ii]++;
                 }
             });
         }
@@ -137,7 +153,9 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
 
     /**
      * Gets the server status from the last poll.
-     * A failure is detected after at least 2 polls.
+     * Reports failures or partially sealed servers.
+     * The reports reflect these abnormalities after
+     * at least 'failedPollLimit' polls.
      *
      * @return A map of failed server nodes and their status.
      */
@@ -148,7 +166,8 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
         HashMap<String, Long> outOfPhaseEpochNodes = new HashMap<>();
 
         if (historyPollCount > 3) {
-            Boolean is_up;
+            boolean is_up;
+            boolean is_partial_seal;
 
             // Simple failure detector: Is there a change in health?
             for (int i = 0; i < historyServers.length; i++) {
@@ -166,6 +185,10 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
 
                 // The count remains within the interval 0 <= failureCount <= failedPollLimit(3)
                 is_up = !(historyPollFailures[i] >= failedPollLimit);
+                // If the seal or paxos was not completed the node is stuck with an older epoch
+                // or has been sealed but layout server has not received latest layout.
+                is_partial_seal = historyPollEpochExceptions[i] >= failedPollLimit;
+
                 // Toggle if server was up and now not responding
                 if (!is_up) {
                     log.debug("Change of status: " + historyServers[i] + " " +
@@ -174,6 +197,7 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
                     historyStatus.put(historyServers[i], is_up);
                     historyPollFailures[i]--;
                 } else if (!historyStatus.get(historyServers[i])) {
+
                     // If server was down but now responsive so wait till reaches lower watermark (0).
                     if (historyPollFailures[i] > 0) {
                         if (--historyPollFailures[i] == 0) {
@@ -186,10 +210,11 @@ public class PeriodicPollPolicy implements IFailureDetectorPolicy {
                         }
                     }
                 }
-                if (historyPollEpochExceptions[i] != -1) {
-                    outOfPhaseEpochNodes.put(historyServers[i], historyPollEpochExceptions[i]);
+                if (is_partial_seal) {
+                    // Mark server as out of phased epoch. NOTE: This is not the same as marking it as failed.
+                    outOfPhaseEpochNodes.put(historyServers[i], historyNodeEpoch.get(historyServers[i]));
                     // Reset epoch exception value.
-                    historyPollEpochExceptions[i] = -1;
+                    historyPollEpochExceptions[i] = 0;
                 }
             }
         }
