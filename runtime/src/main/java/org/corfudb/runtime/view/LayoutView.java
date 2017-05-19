@@ -3,6 +3,7 @@ package org.corfudb.runtime.view;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.protocols.wireprotocol.LayoutPrepareResponse;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.clients.LayoutClient;
 import org.corfudb.runtime.exceptions.NetworkException;
 import org.corfudb.runtime.exceptions.OutrankedException;
 import org.corfudb.runtime.exceptions.QuorumUnreachableException;
@@ -41,7 +42,7 @@ public class LayoutView extends AbstractView {
      * @return The number of nodes required for a quorum.
      */
     public int getQuorumNumber() {
-        return (int) (getCurrentLayout().getLayoutClientStream().count() / 2) + 1;
+        return (int) (getCurrentLayout().getLayoutServers().size() / 2) + 1;
     }
 
     /**
@@ -88,11 +89,13 @@ public class LayoutView extends AbstractView {
     public Layout prepare(long epoch, long rank, Layout layout)
             throws QuorumUnreachableException, OutrankedException, WrongEpochException {
 
-        CompletableFuture<LayoutPrepareResponse>[] prepareList = layout.getLayoutClientStream()
+        CompletableFuture<LayoutPrepareResponse>[] prepareList = layout.getLayoutServers().stream()
                 .map(x -> {
                     CompletableFuture<LayoutPrepareResponse> cf = new CompletableFuture<>();
                     try {
-                        cf = x.prepare(epoch, rank);
+                        // Connection to router can cause network exception too.
+                        LayoutClient layoutClient = layout.getRuntime().getRouter(x).getClient(LayoutClient.class);
+                        cf = layoutClient.prepare(epoch, rank);
                     } catch (Exception e) {
                         cf.completeExceptionally(e);
                     }
@@ -153,11 +156,13 @@ public class LayoutView extends AbstractView {
     @SuppressWarnings("unchecked")
     public Layout propose(long epoch, long rank, Layout layout)
             throws QuorumUnreachableException, OutrankedException {
-        CompletableFuture<Boolean>[] proposeList = layout.getLayoutClientStream()
+        CompletableFuture<Boolean>[] proposeList = layout.getLayoutServers().stream()
                 .map(x -> {
                     CompletableFuture<Boolean> cf = new CompletableFuture<>();
                     try {
-                        cf =  x.propose(epoch, rank, layout);
+                        // Connection to router can cause network exception too.
+                        LayoutClient layoutClient = layout.getRuntime().getRouter(x).getClient(LayoutClient.class);
+                        cf =  layoutClient.propose(epoch, rank, layout);
                     } catch (NetworkException e) {
                         cf.completeExceptionally(e);
                     }
@@ -189,7 +194,7 @@ public class LayoutView extends AbstractView {
             // count successes.
             long count = stream(proposeList)
                     .map(x -> x.getNow(false))
-                    .filter(x -> true)
+                    .filter(x -> x)
                     .count();
 
             log.debug("Successful responses={}, needed={}, timeouts={}", count, getQuorumNumber(), timeouts);
@@ -211,13 +216,16 @@ public class LayoutView extends AbstractView {
      * @param layout
      * @throws WrongEpochException
      */
+    @SuppressWarnings("unchecked")
     public void committed(long epoch, Layout layout)
             throws WrongEpochException {
-        CompletableFuture<Boolean>[] commitList = layout.getLayoutClientStream()
+        CompletableFuture<Boolean>[] commitList = layout.getLayoutServers().stream()
                 .map(x -> {
                     CompletableFuture<Boolean> cf = new CompletableFuture<>();
                     try {
-                        cf = x.committed(epoch, layout);
+                        // Connection to router can cause network exception too.
+                        LayoutClient layoutClient = layout.getRuntime().getRouter(x).getClient(LayoutClient.class);
+                        cf = layoutClient.committed(epoch, layout);
                     } catch (NetworkException e) {
                         cf.completeExceptionally(e);
                     }

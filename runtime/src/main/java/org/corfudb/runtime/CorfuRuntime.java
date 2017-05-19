@@ -6,18 +6,31 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
-import org.corfudb.runtime.clients.*;
+
+import org.corfudb.runtime.clients.IClientRouter;
+import org.corfudb.runtime.clients.LayoutClient;
+import org.corfudb.runtime.clients.LogUnitClient;
+import org.corfudb.runtime.clients.ManagementClient;
+import org.corfudb.runtime.clients.NettyClientRouter;
+import org.corfudb.runtime.clients.SequencerClient;
+import org.corfudb.runtime.exceptions.NetworkException;
 import org.corfudb.runtime.view.AddressSpaceView;
 import org.corfudb.runtime.view.Layout;
 import org.corfudb.runtime.view.LayoutView;
 import org.corfudb.runtime.view.ObjectsView;
 import org.corfudb.runtime.view.SequencerView;
 import org.corfudb.runtime.view.StreamsView;
+
 import org.corfudb.util.GitRepositoryState;
 import org.corfudb.util.MetricsUtils;
 import org.corfudb.util.Version;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
@@ -376,8 +389,8 @@ public class CorfuRuntime {
     private CompletableFuture<Layout> fetchLayout() {
         return CompletableFuture.<Layout>supplyAsync(() -> {
 
+            List<String> layoutServersCopy = new ArrayList<>(layoutServers);
             while (true) {
-                List<String> layoutServersCopy =  layoutServers.stream().collect(Collectors.toList());
                 Collections.shuffle(layoutServersCopy);
                 // Iterate through the layout servers, attempting to connect to one
                 for (String s : layoutServersCopy) {
@@ -398,7 +411,14 @@ public class CorfuRuntime {
                         // Since the variable layoutServers is used only locally within the class it is acceptable
                         // (at least the code on 10/13/2016 does not have issues)
                         // but setEpoch of routers needs to be synchronized as those variables are not local.
-                        l.getAllServers().stream().map(getRouterFunction).forEach(x -> x.setEpoch(l.getEpoch()));
+                        try {
+                            l.getAllServers().stream().map(getRouterFunction).forEach(x -> x.setEpoch(l.getEpoch()));
+                        } catch (NetworkException ne) {
+                            // We have already received the layout and there is no need to keep client waiting.
+                            // NOTE: This is true assuming this happens only at router creation.
+                            // If not we also have to take care of setting the latest epoch on Client Router.
+                            log.warn("Error getting router : {}", ne);
+                        }
                         layoutServers = l.getLayoutServers();
                         layout = layoutFuture;
                         //FIXME Synchronization END
