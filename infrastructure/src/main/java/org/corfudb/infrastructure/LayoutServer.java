@@ -43,7 +43,7 @@ import java.util.Map;
  * Created by mwei on 12/8/15.
  */
 //TODO Finer grained synchronization needed for this class.
-//TODO Need a janitor to cleanup old phases data and to fill up holes in layout history.
+//TODO Need a janitor to cleanup old phases data.
 @Slf4j
 public class LayoutServer extends AbstractServer {
 
@@ -117,11 +117,33 @@ public class LayoutServer extends AbstractServer {
             return;
         } else {
             // else the client is somehow ahead of the server.
-            //TODO figure out a strategy to deal with this situation
+            // Management Server patches the trailing layout servers with the latest layout.
             long serverEpoch = serverContext.getServerEpoch();
             r.sendResponse(ctx, msg, new CorfuPayloadMsg<>(CorfuMsgType.WRONG_EPOCH, serverEpoch));
             log.warn("Message Epoch {} ahead of Server epoch {}", epoch, serverContext.getServerConfig());
         }
+    }
+
+    @ServerHandler(type=CorfuMsgType.LAYOUT_HISTORY_REQUEST, opTimer=metricsPrefix + "historyRequest")
+    public synchronized void handleMessageLayoutHistoryRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r,
+                                                               boolean isMetricsEnabled) {
+        if (!checkBootstrap(msg, ctx, r)) { return; }
+        r.sendResponse(ctx, msg, CorfuMsgType.LAYOUT_HISTORY_RESPONSE.payloadMsg(new LayoutHistoryResponse(getLayoutHistory())));
+    }
+
+    @ServerHandler(type=CorfuMsgType.LAYOUT_HISTORY_RECOVERY, opTimer=metricsPrefix + "historyRecovery")
+    public synchronized void handleMessageLayoutHistoryRecovery(CorfuPayloadMsg<LayoutHistoryResponse> msg, ChannelHandlerContext ctx, IServerRouter r,
+                                                                boolean isMetricsEnabled) {
+        if (!checkBootstrap(msg, ctx, r)) { return; }
+        List<Layout> recoveryHistoryList = msg.getPayload().getLayoutList();
+        List<Layout> localLayoutHistory = getLayoutHistory();
+
+        recoveryHistoryList.forEach(layout -> {
+            if (!localLayoutHistory.contains(layout)) {
+                setLayoutInHistory(layout);
+            }
+        });
+        r.sendResponse(ctx, msg, new CorfuMsg(CorfuMsgType.ACK));
     }
 
     /**
@@ -255,13 +277,13 @@ public class LayoutServer extends AbstractServer {
     /**
      * Accepts any committed layouts for the current epoch or newer epochs.
      * As part of the accept, the server changes it's current layout and epoch.
+     * If a server is left with a hole in the layout history, this is detected and
+     * fixed by the management service.
+     *
      * @param msg
      * @param ctx
      * @param r
      */
-    // TODO If a server does not get SET_EPOCH layout commit message cannot reach it
-    // TODO as this message is not set to ignore EPOCH.
-    // TODO How do we handle holes in history if let in layout commit message. Maybe we have a hole filling process
     @ServerHandler(type=CorfuMsgType.LAYOUT_COMMITTED, opTimer=metricsPrefix + "committed")
     public synchronized void handleMessageLayoutCommit(CorfuPayloadMsg<LayoutCommittedRequest> msg, ChannelHandlerContext ctx, IServerRouter r,
                                                        boolean isMetricsEnabled) {

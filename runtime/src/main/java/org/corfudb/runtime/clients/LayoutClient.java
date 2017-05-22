@@ -10,6 +10,7 @@ import org.corfudb.runtime.exceptions.NoBootstrapException;
 import org.corfudb.runtime.exceptions.OutrankedException;
 import org.corfudb.runtime.view.Layout;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -32,6 +33,9 @@ public class LayoutClient implements IClient {
             new ImmutableSet.Builder<CorfuMsgType>()
                     .add(CorfuMsgType.LAYOUT_REQUEST)
                     .add(CorfuMsgType.LAYOUT_RESPONSE)
+                    .add(CorfuMsgType.LAYOUT_HISTORY_REQUEST)
+                    .add(CorfuMsgType.LAYOUT_HISTORY_RESPONSE)
+                    .add(CorfuMsgType.LAYOUT_HISTORY_RECOVERY)
                     .add(CorfuMsgType.LAYOUT_PREPARE)
                     .add(CorfuMsgType.LAYOUT_BOOTSTRAP)
                     .add(CorfuMsgType.LAYOUT_NOBOOTSTRAP)
@@ -56,6 +60,9 @@ public class LayoutClient implements IClient {
         switch (msg.getMsgType()) {
             case LAYOUT_RESPONSE:
                 router.completeRequest(msg.getRequestID(), ((LayoutMsg) msg).getLayout());
+                break;
+            case LAYOUT_HISTORY_RESPONSE:
+                router.completeRequest(msg.getRequestID(), ((CorfuPayloadMsg<LayoutHistoryResponse>) msg).getPayload());
                 break;
             case LAYOUT_NOBOOTSTRAP:
                 router.completeExceptionally(msg.getRequestID(), new NoBootstrapException());
@@ -88,6 +95,14 @@ public class LayoutClient implements IClient {
      */
     public CompletableFuture<Layout> getLayout() {
         return router.sendMessageAndGetCompletable(CorfuMsgType.LAYOUT_REQUEST.payloadMsg(router.getEpoch()));
+    }
+
+    public CompletableFuture<LayoutHistoryResponse> getLayoutHistory() {
+        return router.sendMessageAndGetCompletable(CorfuMsgType.LAYOUT_HISTORY_REQUEST.msg());
+    }
+
+    public CompletableFuture<Boolean> updateLayoutHistory(List<Layout> layoutHistory) {
+        return router.sendMessageAndGetCompletable(CorfuMsgType.LAYOUT_HISTORY_RECOVERY.payloadMsg(new LayoutHistoryResponse(layoutHistory)));
     }
 
     /**

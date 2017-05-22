@@ -13,10 +13,7 @@ import org.corfudb.infrastructure.management.IFailureDetectorPolicy;
 import org.corfudb.infrastructure.management.IFailureHandlerPolicy;
 import org.corfudb.infrastructure.management.PollReport;
 
-import org.corfudb.protocols.wireprotocol.CorfuMsg;
-import org.corfudb.protocols.wireprotocol.CorfuMsgType;
-import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
-import org.corfudb.protocols.wireprotocol.FailureDetectorMsg;
+import org.corfudb.protocols.wireprotocol.*;
 
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.clients.LayoutClient;
@@ -27,11 +24,7 @@ import org.corfudb.runtime.view.QuorumFuturesFactory;
 
 import java.lang.invoke.MethodHandles;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -40,7 +33,9 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
+import java.util.stream.Collectors;
 
 /**
  * Instantiates and performs failure detection and handling asynchronously.
@@ -99,6 +94,10 @@ public class ManagementServer extends AbstractServer {
      */
     @Getter
     private final long policyExecuteInterval = 1000;
+
+    private final int layoutHoleFillRoundInterval = 3;
+    private int layoutHoleFillRoundCount = 0;
+    private long layoutHoleFillEpoch = -1;
     /**
      * To schedule failure detection.
      */
@@ -420,6 +419,62 @@ public class ManagementServer extends AbstractServer {
 
         // Analyze the poll report and trigger failure handler if needed.
         analyzePollReportAndTriggerHandler(pollReport);
+
+        layoutHoleFill();
+
+    }
+
+    public void layoutHoleFill() {
+
+        // Check if layout hole filling required. If the epoch is up to date, we have checked once.
+        // Check for layout hole fill interval.
+        if (layoutHoleFillEpoch == latestLayout.getEpoch() &&
+                (++layoutHoleFillRoundCount) % layoutHoleFillRoundInterval != 0) {
+            return;
+        }
+
+        layoutHoleFillRoundCount = 0;
+        Map<String, List<Layout>> layoutServerHistoryMap = new HashMap<>();
+        latestLayout.getLayoutServers().forEach(server -> {
+            try {
+                List<Layout> layoutList = getCorfuRuntime().getRouter(server).getClient(LayoutClient.class)
+                        .getLayoutHistory().get().getLayoutList();
+                layoutServerHistoryMap.put(server, layoutList);
+            } catch (Exception e) {
+                log.error("Error fetching layout history from {} cause {}", server, e);
+                layoutServerHistoryMap.put(server, null);
+            }
+        });
+
+        Map<Long, Layout> completeLayoutHistory = new HashMap<>();
+        Set<String> incompleteLayoutServers = new HashSet<>();
+        layoutServerHistoryMap.keySet().forEach(s -> {
+            List<Layout> layoutServerHistory = layoutServerHistoryMap.get(s);
+
+            long count = 0;
+            for (Layout layout : layoutServerHistory) {
+                completeLayoutHistory.putIfAbsent(layout.getEpoch(), layout);
+                if (layout.getEpoch() > count) {
+                    incompleteLayoutServers.add(s);
+                    count = layout.getEpoch();
+                }
+                count++;
+            }
+        });
+
+        // Send layoutHistoryRecovery message to all layoutServers in incomplete set.
+        boolean retryRequired = false;
+        for (String layoutServer : incompleteLayoutServers) {
+            try {
+                getCorfuRuntime().getRouter(layoutServer).getClient(LayoutClient.class)
+                        .updateLayoutHistory(new ArrayList<>(completeLayoutHistory.values()))
+                        .get();
+            } catch (Exception e) {
+                log.warn("Error while updating layout history in {} : {}", layoutServer, e);
+                retryRequired = true;
+            }
+        }
+        if (!retryRequired) layoutHoleFillEpoch = latestLayout.getEpoch();
 
     }
 

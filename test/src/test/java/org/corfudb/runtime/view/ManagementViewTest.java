@@ -12,6 +12,7 @@ import org.corfudb.infrastructure.TestServerRouter;
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.TokenResponse;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.clients.LayoutClient;
 import org.corfudb.runtime.clients.ManagementClient;
 import org.corfudb.runtime.clients.TestRule;
 import org.corfudb.runtime.collections.ISMRMap;
@@ -723,5 +724,79 @@ public class ManagementViewTest extends AbstractViewTest {
         assertThat(getLayoutServer(SERVERS.PORT_0).getCurrentLayout().getEpoch()).isEqualTo(2L);
         assertThat(getLayoutServer(SERVERS.PORT_0).getCurrentLayout()).isEqualTo(layout);
 
+    }
+
+    @Test
+    public void singleLayoutHoleFill() throws Exception {
+
+        addServer(SERVERS.PORT_0);
+        addServer(SERVERS.PORT_1);
+        addServer(SERVERS.PORT_2);
+
+        Layout layout = new TestLayoutBuilder()
+                .setEpoch(1L)
+                .addLayoutServer(SERVERS.PORT_0)
+                .addLayoutServer(SERVERS.PORT_1)
+                .addLayoutServer(SERVERS.PORT_2)
+                .addSequencer(SERVERS.PORT_0)
+                .buildSegment()
+                .setReplicationMode(Layout.ReplicationMode.QUORUM_REPLICATION)
+                .buildStripe()
+                .addLogUnit(SERVERS.PORT_0)
+                .addToSegment()
+                .addToLayout()
+                .build();
+        bootstrapAllServers(layout);
+        CorfuRuntime corfuRuntime = getRuntime(layout).connect();
+        layout.setRuntime(corfuRuntime);
+
+        // Set aggressive timeouts.
+        setAggressiveTimeouts(layout, corfuRuntime,
+                getManagementServer(SERVERS.PORT_0).getCorfuRuntime(),
+                getManagementServer(SERVERS.PORT_1).getCorfuRuntime(),
+                getManagementServer(SERVERS.PORT_2).getCorfuRuntime());
+
+        layout.setEpoch(2L);
+        layout.moveServersToEpoch();
+        addClientRule(corfuRuntime, SERVERS.ENDPOINT_2, new TestRule().always().drop());
+        corfuRuntime.getLayoutView().updateLayout(layout, 1L);
+        clearClientRules(corfuRuntime);
+
+        layout.setEpoch(3L);
+        layout.moveServersToEpoch();
+        corfuRuntime.getLayoutView().updateLayout(layout, 1L);
+
+        LayoutClient lc0 = corfuRuntime.getRouter(SERVERS.ENDPOINT_0).getClient(LayoutClient.class);
+        LayoutClient lc1 = corfuRuntime.getRouter(SERVERS.ENDPOINT_1).getClient(LayoutClient.class);
+        LayoutClient lc2 = corfuRuntime.getRouter(SERVERS.ENDPOINT_2).getClient(LayoutClient.class);
+
+        assertThat(lc0.getLayoutHistory().get().getLayoutList().size()).isEqualTo(3);
+        assertThat(lc1.getLayoutHistory().get().getLayoutList().size()).isEqualTo(3);
+        assertThat(lc2.getLayoutHistory().get().getLayoutList().size()).isEqualTo(2);
+
+        final Semaphore historyRecovered = new Semaphore(1,true);
+        historyRecovered.acquire();
+
+        addClientRule(getManagementServer(SERVERS.PORT_0).getCorfuRuntime(), SERVERS.ENDPOINT_2,
+                new TestRule().matches(msg -> {
+                    if (msg.getMsgType().equals(CorfuMsgType.LAYOUT_HISTORY_RECOVERY)) {
+                        historyRecovered.release();
+                    }
+                    return true;
+                }));
+
+        // Initiate SERVERS.ENDPOINT_0 failureHandler.
+        // This is initiated later so that SERVERS.ENDPOINT_2 is not considered failed and layout is not reconfigured.
+        corfuRuntime.getRouter(SERVERS.ENDPOINT_0).getClient(ManagementClient.class).initiateFailureHandler().get();
+
+        for (int i = 0; i < PARAMETERS.NUM_ITERATIONS_MODERATE; i++) {
+            if (lc2.getLayoutHistory().get().getLayoutList().size() == 3) break;
+            Thread.sleep(PARAMETERS.TIMEOUT_SHORT.toMillis());
+        }
+
+        assertThat(historyRecovered.tryAcquire()).isTrue();
+        assertThat(lc0.getLayoutHistory().get().getLayoutList().size()).isEqualTo(3);
+        assertThat(lc1.getLayoutHistory().get().getLayoutList().size()).isEqualTo(3);
+        assertThat(lc2.getLayoutHistory().get().getLayoutList().size()).isEqualTo(3);
     }
 }

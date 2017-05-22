@@ -10,6 +10,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
+import java.util.List;
 
 /**
  * Created by mwei on 8/8/16.
@@ -72,6 +73,9 @@ public enum CorfuMsgType {
     // EXTRA CODES
     LAYOUT_ALREADY_BOOTSTRAP(60, TypeToken.of(CorfuMsg.class), true),
     LAYOUT_PREPARE_ACK(61, new TypeToken<CorfuPayloadMsg<LayoutPrepareResponse>>(){}, true),
+    LAYOUT_HISTORY_REQUEST(62, TypeToken.of(CorfuMsg.class), true),
+    LAYOUT_HISTORY_RESPONSE(63, new TypeToken<CorfuPayloadMsg<LayoutHistoryResponse>>(){}, true),
+    LAYOUT_HISTORY_RECOVERY(64, new TypeToken<CorfuPayloadMsg<LayoutHistoryResponse>>(){}),
 
     // Management Messages
     MANAGEMENT_BOOTSTRAP_REQUEST(70, new TypeToken<CorfuPayloadMsg<Layout>>(){}, true),
