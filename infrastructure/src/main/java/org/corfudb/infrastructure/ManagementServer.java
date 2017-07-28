@@ -4,8 +4,14 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import io.netty.channel.ChannelHandlerContext;
 
+import java.io.File;
 import java.lang.invoke.MethodHandles;
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import java.lang.management.MemoryPoolMXBean;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -101,8 +107,13 @@ public class ManagementServer extends AbstractServer {
     private static final int sequencerBootstrapRetries = 3;
     private static final long sequencerBootstrapRetryTimeout = 1000;
 
+    @Getter
+    private final ScheduledExecutorService systemMonitoringService;
+    private final long systemMonitorInterval = 30_000;
+
     /**
      * Returns new ManagementServer.
+     *
      * @param serverContext context object providing parameters and objects
      */
     public ManagementServer(ServerContext serverContext) {
@@ -160,6 +171,22 @@ public class ManagementServer extends AbstractServer {
                     TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException err) {
             log.error("Error scheduling failure detection task, {}", err);
+        }
+
+        // Monitors memory and disk usage.
+        this.systemMonitoringService = Executors.newScheduledThreadPool(
+                1,
+                new ThreadFactoryBuilder()
+                        .setDaemon(true)
+                        .setNameFormat("SystemMonitor-" + getLocalEndpoint())
+                        .build());
+        try {
+            systemMonitoringService.scheduleAtFixedRate(this::getSystemStatus,
+                    0,
+                    systemMonitorInterval,
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ree) {
+            log.error("Error scheduling system monitor : {}", ree);
         }
     }
 
@@ -366,6 +393,34 @@ public class ManagementServer extends AbstractServer {
         NodeMetrics nodeMetrics = NodeMetrics.getDefaultInstance();
         r.sendResponse(ctx, msg, new CorfuPayloadMsg<>(CorfuMsgType.HEARTBEAT_RESPONSE,
                 nodeMetrics.toByteArray()));
+    }
+
+    /**
+     * Collects node CPU and memory statistics and analyzes them.
+     */
+    private void getSystemStatus() {
+
+        MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
+        List<MemoryPoolMXBean> memoryPoolMXBeans = ManagementFactory.getMemoryPoolMXBeans();
+
+        log.trace("System load average: {}",
+                ManagementFactory.getOperatingSystemMXBean().getSystemLoadAverage());
+        log.trace("Heap memory usage: {}", memoryMXBean.getHeapMemoryUsage());
+        log.trace("Non-heap memory usage: {}", memoryMXBean.getNonHeapMemoryUsage());
+
+        memoryPoolMXBeans.forEach(memoryPoolMXBean -> {
+            try {
+                log.trace("mem pool:{} usage:{}",
+                        memoryPoolMXBean.getName(), memoryPoolMXBean.getUsage());
+            } catch (Exception ignore) {
+            }
+        });
+
+        log.trace("Free JVM memory : {} bytes", Runtime.getRuntime().freeMemory());
+
+        Arrays.stream(File.listRoots()).forEach(file ->
+                log.trace("usable space on disk {} : {}",
+                        file.getAbsolutePath(), file.getUsableSpace()));
     }
 
     /**
